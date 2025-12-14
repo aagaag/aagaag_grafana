@@ -1,12 +1,12 @@
 {
-    "id": "{170B7140-2E63-ACE1-5C6A-3B4AF5978242}",
-    "author": "1007",
-    "name": "Grafana",
-    "url": "https://github.com/1007/Symcon1007_Grafana",
-    "compatibility": {
-        "version": "5.0"
-    },
-    "version": "1.4",
-    "build": 17,
-    "date": 1703747908
+  "id": "{9B2F6E3E-8F91-4E5B-A5D6-202600000001}",
+  "author": "Adriano Aguzzi",
+  "name": "Grafana2026",
+  "url": "https://github.com/aagaag/aagaag_grafana",
+  "compatibility": {
+    "version": "5.0"
+  },
+  "version": "2026.1",
+  "build": 1,
+  "date": 1767225600
 }
