@@ -4,7 +4,7 @@
 //  Name        : Grafana Modul.php modified by aagaag
 //******************************************************************************
 
-class Grafana extends IPSModule
+class Grafana2026 extends IPSModule
 {
     //**********************************************************************
     // Create
