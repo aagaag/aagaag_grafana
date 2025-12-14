@@ -113,17 +113,17 @@ class Grafana2026 extends IPSModule
     //**************************************************************************
     private function ExtractSearchTarget($body): string
     {
-        // accepts {}, {"target":""}, {"metric":""}, ["foo"], [""] ...
-        if (is_array($body)) {
-            if (isset($body['target']) && is_string($body['target'])) {
-                return $body['target'];
-            }
-            if (isset($body['metric']) && is_string($body['metric'])) {
-                return $body['metric'];
-            }
-            if (isset($body[0]) && is_string($body[0])) {
-                return $body[0];
-            }
+        if (!is_array($body)) {
+            return '';
+        }
+        if (isset($body['target']) && is_string($body['target'])) {
+            return $body['target'];
+        }
+        if (isset($body['metric']) && is_string($body['metric'])) {
+            return $body['metric'];
+        }
+        if (isset($body[0]) && is_string($body[0])) {
+            return $body[0];
         }
         return '';
     }
@@ -216,7 +216,9 @@ class Grafana2026 extends IPSModule
         if ($endpoint === 'search' || $endpoint === 'metrics') {
             // Must be POST for Grafana; but be forgiving.
             $body = $this->ReadJsonBody();
-            $data_target = $this->ExtractSearchTarget($body);
+            $data_target = (string)$this->ExtractSearchTarget($body);
+            $data_target = trim($data_target);
+
 
             $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Endpoint:" . $endpoint . " Method:" . $method, 0);
             $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "SearchTarget:" . $data_target, 0);
@@ -647,6 +649,7 @@ class Grafana2026 extends IPSModule
     //******************************************************************************
     protected function ReturnMetrics($data_target)
     {
+        $data_target = trim((string)$data_target);
         $archiv = $this->GetArchivID();
         $varList = IPS_GetVariableList();
 
@@ -668,7 +671,7 @@ class Grafana2026 extends IPSModule
 
                 $metrics = $var . "," . $name . "[" . $parent . "]";
 
-                if ($data_target != "") {
+                if ($data_target !== "") {
                     $found = stripos($metrics, $data_target);
                     if ($found === false) {
                         continue;
