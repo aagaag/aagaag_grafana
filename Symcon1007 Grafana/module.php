@@ -1,1323 +1,1037 @@
 <?php
-    
+
 //******************************************************************************
-//	Name		:	Grafana Modul.php
-//		
-//		
-//
+//  Name        : Grafana Modul.php modified by aagaag
 //******************************************************************************
 
+class Grafana extends IPSModule
+{
+    //**********************************************************************
+    // Create
+    //**********************************************************************
+    public function Create()
+    {
+        parent::Create();
 
-	//**********************************************************************
-	//	
-	//**********************************************************************
-	class Grafana extends IPSModule
-	{
-	//**********************************************************************
-	//
-	//**********************************************************************    
-	public function Create()
-		{
-		//Never delete this line!
-		parent::Create();
-		
-		$this->RegisterPropertyString("BasicAuthUser", "");
-		$this->RegisterPropertyString("BasicAuthPassword", "");
-		$this->RegisterPropertyBoolean("Logging", false); 
+        $this->RegisterPropertyString("BasicAuthUser", "");
+        $this->RegisterPropertyString("BasicAuthPassword", "");
+        $this->RegisterPropertyBoolean("Logging", false);
 
-		$runlevel = IPS_GetKernelRunlevel();
-		if ( $runlevel == KR_READY )
-			{
-			$this->CreateHooks();
-			}
-		else
-			{
+        $runlevel = IPS_GetKernelRunlevel();
+        if ($runlevel == KR_READY) {
+            $this->CreateHooks();
+        } else {
             $this->RegisterMessage(0, IPS_KERNELMESSAGE);
-			}
-				
-		}
+        }
+    }
 
-	//**************************************************************************
-	// Inspired by module SymconTest/HookServe
-	//**************************************************************************    
+    //**************************************************************************
+    // MessageSink
+    //**************************************************************************
     public function MessageSink($TimeStamp, $SenderID, $Message, $Data)
     {
         parent::MessageSink($TimeStamp, $SenderID, $Message, $Data);
 
-        if ($Message == IPS_KERNELMESSAGE && $Data[0] == KR_READY) 
-        	{
-        	$this->LogMessage("GRAFANA KR_Ready", KL_MESSAGE);	
+        if ($Message == IPS_KERNELMESSAGE && $Data[0] == KR_READY) {
+            $this->LogMessage("GRAFANA KR_Ready", KL_MESSAGE);
             $this->CreateHooks();
-			
-        	}
-	
-	}
+        }
+    }
 
-	//**************************************************************************
-	//
-	//**************************************************************************    
-	public function ApplyChanges()
-		{
-		//Never delete this line!
-		parent::ApplyChanges();
+    //**************************************************************************
+    // ApplyChanges
+    //**************************************************************************
+    public function ApplyChanges()
+    {
+        parent::ApplyChanges();
+        $this->SetStatus(102);
+    }
 
-		$this->SetStatus(102);
+    //**************************************************************************
+    // Hooks erstellen
+    //**************************************************************************
+    protected function CreateHooks()
+    {
+        $this->LogMessage("GRAFANA: Create Hooks", KL_MESSAGE);
 
-		}
+        // root hook and legacy endpoints
+        $this->SubscribeHook("");
+        $this->SubscribeHook("/query");
+        $this->SubscribeHook("/search");
 
-	//**************************************************************************
-	// Hooks erstellen
-	//**************************************************************************
-	protected function CreateHooks()
-		{
+        // NEW: latest simpod-json-datasource uses /metrics instead of /search
+        $this->SubscribeHook("/metrics");
 
-		$this->LogMessage("GRAFANA: Create Hooks", KL_MESSAGE);	
-	
-		$this->SubscribeHook("");
-		$this->SubscribeHook("/query");
-		$this->SubscribeHook("/search");
+        // NEW: recommended by simpod-json-datasource
+        $this->SubscribeHook("/metric-payload-options");
+    }
 
-        }	
+    //**************************************************************************
+    // Helper: request endpoint
+    //**************************************************************************
+    private function GetEndpoint(): string
+    {
+        $uri = $_SERVER['REQUEST_URI'] ?? '';
+        $path = parse_url($uri, PHP_URL_PATH);
+        if (!is_string($path)) {
+            return '';
+        }
+        $path = rtrim($path, '/');
 
-	//**************************************************************************
-	// Hook Data auswerten
-	//**************************************************************************
-	protected function ProcessHookData()
-		{
-		GLOBAL $_IPS;
-		GLOBAL $data_panelId;
+        // expected paths:
+        // /hook/Grafana
+        // /hook/Grafana/search
+        // /hook/Grafana/metrics
+        // /hook/Grafana/query
+        // /hook/Grafana/metric-payload-options
+        if (preg_match('~/hook/Grafana(?:/(.*))?$~i', $path, $m)) {
+            $ep = isset($m[1]) ? strtolower(trim($m[1], '/')) : '';
+            return $ep; // '' means root
+        }
+        return '';
+    }
 
-		// IPS_LogMessage("WebSocket", file_get_contents("php://input"));
+    //**************************************************************************
+    // Helper: JSON body read/parse (robust)
+    //**************************************************************************
+    private function ReadJsonBody()
+    {
+        $raw = file_get_contents("php://input");
+        if ($raw === false) {
+            return [];
+        }
+        $raw = trim($raw);
+        if ($raw === '') {
+            return [];
+        }
+        $decoded = json_decode($raw, true);
+        return is_array($decoded) ? $decoded : [];
+    }
 
+    //**************************************************************************
+    // Helper: extract "search string" for /search or /metrics
+    //**************************************************************************
+    private function ExtractSearchTarget($body): string
+    {
+        // accepts {}, {"target":""}, {"metric":""}, ["foo"], [""] ...
+        if (is_array($body)) {
+            if (isset($body['target']) && is_string($body['target'])) {
+                return $body['target'];
+            }
+            if (isset($body['metric']) && is_string($body['metric'])) {
+                return $body['metric'];
+            }
+            if (isset($body[0]) && is_string($body[0])) {
+                return $body[0];
+            }
+        }
+        return '';
+    }
 
-		if(!isset($_SERVER['PHP_AUTH_USER']))
-			$_SERVER['PHP_AUTH_USER'] = "";
-		if(!isset($_SERVER['PHP_AUTH_PW']))
-			$_SERVER['PHP_AUTH_PW'] = "";
+    //**************************************************************************
+    // Helper: JSON response
+    //**************************************************************************
+    private function RespondJson($payload, int $status = 200): void
+    {
+        http_response_code($status);
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    }
 
-		$AuthUser = $this->ReadPropertyString("BasicAuthUser");	
-		$AuthPassword = $this->ReadPropertyString("BasicAuthPassword");	
-		
-		$HookStarttime = time();
-		$this->SendDebug(__FUNCTION__."[".__LINE__."]", "Hook Startime:".$this->TimestampToDate($HookStarttime), 0);	
+    //**************************************************************************
+    // Helper: plain response
+    //**************************************************************************
+    private function RespondText(string $text, int $status = 200): void
+    {
+        http_response_code($status);
+        header('Content-Type: text/plain; charset=utf-8');
+        echo $text;
+    }
 
-		$auth = false ;
+    //**************************************************************************
+    // Auth check (Basic Auth)
+    //**************************************************************************
+    private function CheckBasicAuth(): bool
+    {
+        if (!isset($_SERVER['PHP_AUTH_USER'])) {
+            $_SERVER['PHP_AUTH_USER'] = "";
+        }
+        if (!isset($_SERVER['PHP_AUTH_PW'])) {
+            $_SERVER['PHP_AUTH_PW'] = "";
+        }
 
-		if ($_SERVER['PHP_AUTH_USER'] == $AuthUser and $_SERVER['PHP_AUTH_PW'] == $AuthPassword) 
-		    {
+        $AuthUser = $this->ReadPropertyString("BasicAuthUser");
+        $AuthPassword = $this->ReadPropertyString("BasicAuthPassword");
+
+        $ok = ($_SERVER['PHP_AUTH_USER'] === $AuthUser && $_SERVER['PHP_AUTH_PW'] === $AuthPassword);
+
+        $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Grafana AUTH:" . $_SERVER['PHP_AUTH_USER'] . "-(pw)", 0);
+        $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Modul AUTH:" . $AuthUser . "-(pw)", 0);
+
+        if ($ok) {
             $this->SetStatus(102);
-            $auth = true;
-			}	
-		else
-			{
-			$this->SetStatus(202);
-			}	
-			
-		$this->SendDebug(__FUNCTION__."[".__LINE__."]", "Grafana AUTH:".$_SERVER['PHP_AUTH_USER']."-".$_SERVER['PHP_AUTH_PW'], 0);
-        $this->SendDebug(__FUNCTION__."[".__LINE__."]", "Modul AUTH:".$AuthUser."-".$AuthPassword, 0);
-            
-		if ( $auth == false )
-			{
+            return true;
+        }
 
-			echo "Verbindung OK . User Password fehlerhaft !";
-			$this->SendDebug(__FUNCTION__."[".__LINE__."]", "Modul AUTH fehlerhaft!!", 0);
-			$this->SetStatus(202);
-			
-			return false;	
-			}
+        $this->SetStatus(202);
+        return false;
+    }
 
-		$data = file_get_contents("php://input");
+    //**************************************************************************
+    // Hook Data auswerten
+    //**************************************************************************
+    protected function ProcessHookData()
+    {
+        GLOBAL $_IPS;
+        GLOBAL $data_panelId;
 
-		$d = json_decode($data,true);
+        $HookStarttime = time();
+        $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Hook Startime:" . $this->TimestampToDate($HookStarttime), 0);
 
+        // Auth
+        if (!$this->CheckBasicAuth()) {
+            // Grafana expects proper HTTP codes; still keep a human message for manual curl.
+            $this->RespondText("Verbindung OK . User Password fehlerhaft !", 401);
+            $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Modul AUTH fehlerhaft!!", 0);
+            return false;
+        }
 
-		if ( isset($d['type'] ) )
-			$data_type 	= $d['type'];
-		else
-			$data_type = "";
+        $endpoint = $this->GetEndpoint();
+        $method = strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET');
 
-		// Sonderfall weil ohne 'type' ????????	
-		if ( isset($d['target'] ) )
-			$data_target = $d['target'];
-		
-		   
+        // Root endpoint: health check
+        if ($endpoint === '') {
+            // Keep it simple and fast
+            $this->RespondText("OK", 200);
+            return;
+        }
 
-		$data_app 				= @$d['app'];
-		$data_requestId 		= @$d['requestId'];
-		$data_timezone 			= @$d['timezone'];
-		$data_panelId 			= @$d['panelId'];
-		$data_dashboardId		= @$d['dashboardId'];
-		$data_interval			= @$d['interval'];
-		$data_maxDataPoints		= @$d['maxDataPoints'];
-		
-        
-		$this->Logging("PanelID:".$data_panelId,$data_panelId,true);			
+        // metric payload options (recommended by latest simpod-json-datasource)
+        if ($endpoint === 'metric-payload-options') {
+            $this->RespondJson([], 200);
+            return;
+        }
 
+        // /search (legacy) and /metrics (latest simpod-json-datasource)
+        if ($endpoint === 'search' || $endpoint === 'metrics') {
+            // Must be POST for Grafana; but be forgiving.
+            $body = $this->ReadJsonBody();
+            $data_target = $this->ExtractSearchTarget($body);
 
-    	$this->SendDebug(__FUNCTION__."[".__LINE__."]","Raw:".$data,0);
-    	$this->SendDebug(__FUNCTION__."[".__LINE__."]","APP:".$data_app,0);
-    	$this->SendDebug(__FUNCTION__."[".__LINE__."]","TYPE:".$data_type,0);
-    	$this->SendDebug(__FUNCTION__."[".__LINE__."]","RequestID:".$data_requestId,0);
-    	$this->SendDebug(__FUNCTION__."[".__LINE__."]","Timezone:".$data_timezone,0);
-    	$this->SendDebug(__FUNCTION__."[".__LINE__."]","PanelID:".$data_panelId,0);
-    	$this->SendDebug(__FUNCTION__."[".__LINE__."]","Dashboard:".$data_dashboardId,0);
-    	$this->SendDebug(__FUNCTION__."[".__LINE__."]","Intervall:".$data_interval,0);
-    	$this->SendDebug(__FUNCTION__."[".__LINE__."]","MaxDatapoints:".$data_maxDataPoints,0);
-		if ( isset($data_target ))
-			$this->SendDebug(__FUNCTION__."[".__LINE__."]","Target:".$data_target,0);
-    	
-		
-		if (isset($data_target)) 
-			{
-            $this->SendDebug(__FUNCTION__."[".__LINE__."]", "Target ist gesetzt [".$data_target."]", 0);
-            $targetset = true;
-        	}	
-		else
-			{
-			$this->SendDebug(__FUNCTION__."[".__LINE__."]", "Target ist nicht gesetzt", 0);
-			$targetset = false;
-			}	
+            $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Endpoint:" . $endpoint . " Method:" . $method, 0);
+            $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "SearchTarget:" . $data_target, 0);
 
-		if ( $data_type == "timeseries" or $targetset == true)		// Request Metrics
-			{
-			$string = $this->ReturnMetrics($data_target);	
-			$this->SendDebug(__FUNCTION__."[".__LINE__."]","RequestMetrics:".$string,0);
-			echo $string;	
-			
-			return ;	
-			}
+            // ReturnMetrics currently returns a JSON string; decode and re-encode to guarantee JSON validity
+            $metricsJson = $this->ReturnMetrics($data_target);
+            $metricsArr = json_decode($metricsJson, true);
+            if (!is_array($metricsArr)) {
+                // Fall back to empty array; never emit PHP warnings/html here
+                $metricsArr = [];
+            }
 
-		if ($data == '{"payload":{}}' or $data == '{}')		// Add Metric ab Version 10.2 ???
-			{
-				$string = $this->ReturnMetrics($data_target);	
-				$this->SendDebug(__FUNCTION__.'['.__LINE__.']',"Explore:".$string,0);
-				return;
-			}
+            $this->RespondJson($metricsArr, 200);
+            return;
+        }
 
+        // Everything else: treat as query request path
+        // Keep your original logic largely intact, but prevent "browser not supported" from breaking valid POSTs.
 
-		if ( $data_app == "explore" and $targetset == true )		// Explore
-			{
-			$string = $this->ReturnMetrics($data_target);	
-			$this->SendDebug(__FUNCTION__.'['.__LINE__.']',"Explore:".$string,0);
-			// echo $string;	
-			// return;	
-			}
-	
-			
-		$x = 0; 
+        $data = file_get_contents("php://input");
+        if ($data === false) {
+            $data = '';
+        }
 
-		if ($data_app == "dashboard") ; 	// Manchmal fehlt dashboard
-			{
-			
-			// bei Aufruf durch Browser Meldung ausgeben
-			if ( isset($d['targets']) == false )
-				{
-				echo "Aufruf im Browser wird nicht unterstuetzt";
-				return false;	
-				}
+        $d = json_decode($data, true);
+        if (!is_array($d)) {
+            $d = [];
+        }
 
-			foreach ($d['targets'] as $target) 
-				{
-			
-				if ( isset ($target['target']) == false )
-					{
-					$this->SendDebug(__FUNCTION__."[".__LINE__."]", "Target is empty! Panel:".$data_panelId." Dashboard:".$data_dashboardId, 0);
-                	continue;
-					}	
+        // Extract fields safely
+        $data_type = isset($d['type']) ? $d['type'] : "";
+        $data_target = isset($d['target']) ? $d['target'] : ""; // FIX: always defined now
 
-				$data_target[$x] = $target['target'];
+        $data_app = @$d['app'];
+        $data_requestId = @$d['requestId'];
+        $data_timezone = @$d['timezone'];
+        $data_panelId = @$d['panelId'];
+        $data_dashboardId = @$d['dashboardId'];
+        $data_interval = @$d['interval'];
+        $data_maxDataPoints = @$d['maxDataPoints'];
 
+        $this->Logging("PanelID:" . $data_panelId, $data_panelId, true);
 
-				if ( isset($target['hide']) == false )
-					{
-					$this->SendDebug(__FUNCTION__.'['.__LINE__.']', "Target Hide is empty! ", 0);
-					$data_hide[$x] = false ;
-					}
-				else
-					{
-					$data_hide[$x] = $target['hide'];
-					}
-				
-				$data_data[$x]	= false;
-				$data_data[$x] = @$target['data'];	// Additional Data
-				// $data_data[$x] = @$target['payload'];	// Additional Data
-				
-				if ( isset($target['payload']))
-					{
-					$data_data[$x] = @$target['payload'];	// Additional Data
-					//foreach($data_data[$x] as $key => $value)
-					//	$this->SendDebug(__FUNCTION__.'['.__LINE__.']', "Additional Data:".$key. " - ".$value, 0);
+        $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Endpoint:" . $endpoint . " Method:" . $method, 0);
+        $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Raw:" . $data, 0);
+        $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "APP:" . $data_app, 0);
+        $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "TYPE:" . $data_type, 0);
+        $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "RequestID:" . $data_requestId, 0);
+        $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Timezone:" . $data_timezone, 0);
+        $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "PanelID:" . $data_panelId, 0);
+        $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Dashboard:" . $data_dashboardId, 0);
+        $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Intervall:" . $data_interval, 0);
+        $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "MaxDatapoints:" . $data_maxDataPoints, 0);
+        $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Target:" . $data_target, 0);
 
-					}	
+        $targetset = ($data_target !== "");
 
-				// $this->SendDebug(__FUNCTION__.'['.__LINE__.']', "Additional Data:".$ss, 0);
+        // Legacy shortcut: "request metrics" (older protocol)
+        if ($data_type == "timeseries" || $targetset == true) {
+            $string = $this->ReturnMetrics($data_target);
+            $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "RequestMetrics:" . $string, 0);
+            header('Content-Type: application/json; charset=utf-8');
+            echo $string;
+            return;
+        }
 
-				$ObjectType = IPS_GetObject($data_target[$x]) ;
-				$ObjectType = $ObjectType['ObjectType'];
-				if ( $ObjectType == 6 )
-					{
-					
-					$Link = IPS_GetLink($data_target[$x]);
-					$data_target[$x] = $Link['TargetID'];
+        // Explore quirks (Grafana 10+ sometimes sends {} or {"payload":{}})
+        if ($data == '{"payload":{}}' || trim($data) == '{}' || $data_app == "explore") {
+            $string = $this->ReturnMetrics($data_target);
+            $this->SendDebug(__FUNCTION__ . '[' . __LINE__ . ']', "Explore:" . $string, 0);
+            // For Explore metrics requests, returning JSON helps.
+            header('Content-Type: application/json; charset=utf-8');
+            echo $string;
+            return;
+        }
 
-					$this->SendDebug(__FUNCTION__.'['.__LINE__.']', "Type ist Link : ".$ObjectType . " - ".$Link['TargetID'], 0);
-					}
+        // Dashboard query handling
+        $x = 0;
 
-					
-                $this->SendDebug(__FUNCTION__.'['.__LINE__.']', "Target:".$data_target[$x] . " - Type : ".$ObjectType, 0);
+        if ($data_app == "dashboard") {
+            // Reject browser GET/invalid payload only; DO NOT reject valid POSTs
+            if ($method === 'GET') {
+                $this->RespondText("Aufruf im Browser wird nicht unterstuetzt", 405);
+                return false;
+            }
 
-				if ($data_hide[$x] != false )
-                	$this->SendDebug(__FUNCTION__."[".__LINE__."]", "Hide:".$data_hide[$x], 0);
+            if (!isset($d['targets']) || !is_array($d['targets'])) {
+                // This is not a Grafana /query payload
+                $this->RespondText("Invalid Grafana query payload (missing targets)", 400);
+                return false;
+            }
+
+            foreach ($d['targets'] as $target) {
+                if (!isset($target['target'])) {
+                    $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Target is empty! Panel:" . $data_panelId . " Dashboard:" . $data_dashboardId, 0);
+                    continue;
+                }
+
+                $data_target[$x] = $target['target'];
+
+                if (!isset($target['hide'])) {
+                    $this->SendDebug(__FUNCTION__ . '[' . __LINE__ . ']', "Target Hide is empty!", 0);
+                    $data_hide[$x] = false;
+                } else {
+                    $data_hide[$x] = $target['hide'];
+                }
+
+                $data_data[$x] = false;
+                $data_data[$x] = @$target['data']; // Additional Data (legacy)
+
+                if (isset($target['payload'])) {
+                    $data_data[$x] = @$target['payload']; // Additional Data (new)
+                }
+
+                $ObjectType = IPS_GetObject($data_target[$x]);
+                $ObjectType = $ObjectType['ObjectType'];
+                if ($ObjectType == 6) {
+                    $Link = IPS_GetLink($data_target[$x]);
+                    $data_target[$x] = $Link['TargetID'];
+                    $this->SendDebug(__FUNCTION__ . '[' . __LINE__ . ']', "Type ist Link : " . $ObjectType . " - " . $Link['TargetID'], 0);
+                }
+
+                $this->SendDebug(__FUNCTION__ . '[' . __LINE__ . ']', "Target:" . $data_target[$x] . " - Type : " . $ObjectType, 0);
+
+                if ($data_hide[$x] != false) {
+                    $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Hide:" . $data_hide[$x], 0);
+                }
                 $x++;
-            	}
-	
-			// Keine Targets ?
-			if (isset($data_target) == false) 
-				{
-				$this->SendDebug(__FUNCTION__."[".__LINE__."]", "Alle Targets sind leer ! Panel:".$data_panelId." Dashboard:".$data_dashboardId, 0);
-                	
+            }
+
+            if (!isset($data_target) || !is_array($data_target)) {
+                $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Alle Targets sind leer ! Panel:" . $data_panelId . " Dashboard:" . $data_dashboardId, 0);
                 return;
-				}
-				
+            }
+
             $data_rangefrom = $d['range']['from'];
-            $data_rangeto   = $d['range']['to'];
-			
-
-			// if ( $data_hide == true )
-				// return;
-
-            // $this->SendDebug(__FUNCTION__."[".__LINE__."]", "From:".$data_rangefrom, 0);
-            // $this->SendDebug(__FUNCTION__."[".__LINE__."]", "To:".$data_rangeto, 0);
-			// $this->SendDebug(__FUNCTION__."[".__LINE__."]", "Hide:".$data_hide,0);
+            $data_rangeto = $d['range']['to'];
 
             $data_rangefrom = strtotime($d['range']['from']);
-            $data_rangeto   = strtotime($d['range']['to']);
+            $data_rangeto = strtotime($d['range']['to']);
 
-			// Endzeit liegt in der Zukunft
-			if ( $data_rangeto > time() )
-				$data_rangeto = time();
-			
+            if ($data_rangeto > time()) {
+                $data_rangeto = time();
+            }
 
-			$output = "From:".$this->TimestampToDate($data_rangefrom) . " - " ."To:".$this->TimestampToDate($data_rangeto);	
-            $this->SendDebug(__FUNCTION__."[".__LINE__."]", $output, 0);
-            $this->Logging($output,$data_panelId);
-
-
-            // $agstufe = $this->CheckZeitraumForAggregatedValues($data_rangefrom, $data_rangeto);
+            $output = "From:" . $this->TimestampToDate($data_rangefrom) . " - " . "To:" . $this->TimestampToDate($data_rangeto);
+            $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", $output, 0);
+            $this->Logging($output, $data_panelId);
 
             $data_starttime = $d['startTime'];
-            $data_starttime = intval($data_starttime/1000);
+            $data_starttime = intval($data_starttime / 1000);
             $data_starttime = $this->TimestampToDate($data_starttime);
 
-
-            $this->SendDebug(__FUNCTION__."[".__LINE__."]", "Startime:".$data_starttime, 0);
+            $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Startime:" . $data_starttime, 0);
 
             $stringall = "";
-			$loop = 0;
 
-			
-			// Beginn neue Version
-			// ************** Stopuhr Start
-			// microtime nicht auf allen Systemen
-			// $microtimestart = microtime(true);
-
-			foreach ($data_target as $key => $dataID) 
-				{
+            foreach ($data_target as $key => $dataID) {
                 $pieces = explode(",", $dataID);
 
                 $ID = $pieces[0];
                 $target = @$pieces[1];
 
-                $this->SendDebug(__FUNCTION__."[".__LINE__."]", "Data ID:".$ID, 0);
-			
-				if ($data_hide[$key] == true) 
-					{
-                    $this->SendDebug(__FUNCTION__."[".__LINE__."]", "Data ID: HIDE ", 0);
-					continue; 
-					}
+                $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Data ID:" . $ID, 0);
 
-				$additional_data = $this->GetAdditionalData($data_data[$key]);
-
-				if ($additional_data['TimeOffset'] == 0 )
-					{
-					$this->SendDebug(__FUNCTION__."[".__LINE__."]", "TimeOffset = 0 ", 0);
-					}	
-				else
-					{
-					$this->SendDebug(__FUNCTION__."[".__LINE__."]", "TimeOffset =  ".$additional_data['TimeOffset'] , 0);
-					
-					//$this->SendDebug(__FUNCTION__."[".__LINE__."]", "TimeOffset =  ".$this->TimestampToDate($data_rangefrom) , 0);
-
-					$data_rangefrom = $data_rangefrom - $additional_data['TimeOffset'];
-					$data_rangeto   = $data_rangeto - $additional_data['TimeOffset'];
-					
-					$this->SendDebug(__FUNCTION__."[".__LINE__."]", "TimeOffset from =  ".$this->TimestampToDate($data_rangefrom) , 0);
-					$this->SendDebug(__FUNCTION__."[".__LINE__."]", "TimeOffset to   =  ".$this->TimestampToDate($data_rangeto) , 0);
-
-					}	
-
-
-				$data_additional = false ;
-				
-				$add = -1;	// 0 nicht moeglich
-				if ($data_data[$key] == true) 
-					{
-					$data_additional = $data_data[$key];
-							
-					}
-
-					
-				if (isset($ID) == false) 
-					{
-					continue;
-					}
-				
-				// checken ob exist und geloggt	
-				if ($this->CheckVariable($ID) == false) 
-					{
+                if ($data_hide[$key] == true) {
+                    $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Data ID: HIDE", 0);
                     continue;
-                	}
-			   
-				$array = IPS_GetVariable($ID);
-				$typ = $array['VariableType'];
+                }
 
-				$RecordLimit = 9999;
-				$RecordLimit = IPS_GetOption('ArchiveRecordLimit') - 1 ;
+                $additional_data = $this->GetAdditionalData($data_data[$key]);
 
-				$AggregationsStufe = $additional_data['Aggregationsstufe'];
+                if ($additional_data['TimeOffset'] != 0) {
+                    $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "TimeOffset = " . $additional_data['TimeOffset'], 0);
 
-				// Besser hier, da fuer jeden Graph eigene Stufe
-				$agstufe = $this->CheckZeitraumForAggregatedValues($data_rangefrom, $data_rangeto,$ID,$AggregationsStufe);
-				// $agstufe = 99; // Versuch 1
+                    $data_rangefrom = $data_rangefrom - $additional_data['TimeOffset'];
+                    $data_rangeto = $data_rangeto - $additional_data['TimeOffset'];
 
-				
-				// Archivdaten fuer eine Variable holen
-				$data = $this->GetArchivData($ID, $data_rangefrom, $data_rangeto, $agstufe,$typ,$additional_data);       
-				
-				if($data == FALSE)	// wird nicht geloggt
-					continue;
-				
-                $count = count($data);
-                $this->SendDebug(__FUNCTION__."[".__LINE__."]", "1. Versuch Data Count:".$count, 0);
+                    $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "TimeOffset from = " . $this->TimestampToDate($data_rangefrom), 0);
+                    $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "TimeOffset to   = " . $this->TimestampToDate($data_rangeto), 0);
+                } else {
+                    $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "TimeOffset = 0", 0);
+                }
 
-				if( $count > $RecordLimit )		// Maximale Anzahl Daten erreicht
-					{	
-					$agstufe = 6; // 1 minuetig		
-					$data = $this->GetArchivData($ID, $data_rangefrom, $data_rangeto, $agstufe,$typ,$additional_data);
-					if ( $data == false )
-						$counts = "Fehler";
-					else
-						$count = count($data);
-					$this->SendDebug(__FUNCTION__."[".__LINE__."]", "2. Versuch Data Count:".$count, 0);
-					}
+                $data_additional = false;
+                if ($data_data[$key] == true) {
+                    $data_additional = $data_data[$key];
+                }
 
-				if( $count > $RecordLimit or $count == false )		// Maximale Anzahl Daten erreicht
-					{	
-					$agstufe = 5; // 5 minuetig	Problem !!!	
-					$data = $this->GetArchivData($ID, $data_rangefrom, $data_rangeto, $agstufe,$typ,$additional_data);
-					if ( $data == false )
-						$counts = "Fehler";
-					else
-						$count = count($data);
-					$this->SendDebug(__FUNCTION__."[".__LINE__."]", "3. Versuch Data Count:".$count, 0);
-					}
-                 
-				if( $count > $RecordLimit or $count == false )		// Maximale Anzahl Daten erreicht
-					{	
-					$agstufe = 0; // stuendlich		
-					$data = $this->GetArchivData($ID, $data_rangefrom, $data_rangeto, $agstufe,$typ,$additional_data);
-					$count = count($data);
-					$this->SendDebug(__FUNCTION__."[".__LINE__."]", "4. Versuch Data Count:".$count, 0);
-					}
+                if (!isset($ID)) {
+                    continue;
+                }
 
-				if( $count > $RecordLimit )		// Maximale Anzahl Daten erreicht
-					{	
-					$agstufe = 1; // taeglich		
-					$data = $this->GetArchivData($ID, $data_rangefrom, $data_rangeto, $agstufe,$typ,$additional_data);
-					$count = count($data);
-					$this->SendDebug(__FUNCTION__."[".__LINE__."]", "5. Versuch Data Count:".$count, 0);
-					}
+                if ($this->CheckVariable($ID) == false) {
+                    continue;
+                }
 
+                $array = IPS_GetVariable($ID);
+                $typ = $array['VariableType'];
 
-				$DataOffset = $additional_data['DataOffset'];
-				$TimeOffset = $additional_data['TimeOffset'];
-				// $TimeOffset = 0;
-				$this->SendDebug(__FUNCTION__."[".__LINE__."]", "TimeOffSet:".$TimeOffset, 0);
-				
+                $RecordLimit = IPS_GetOption('ArchiveRecordLimit') - 1;
 
-				if ( isset($additional_data['ReverseData']) == true )
-					if ( $additional_data['ReverseData'] == true )
-						{
-						$this->SendDebug(__FUNCTION__."[".__LINE__."]", "Data Reverse.", 0);
+                $AggregationsStufe = $additional_data['Aggregationsstufe'];
+                $agstufe = $this->CheckZeitraumForAggregatedValues($data_rangefrom, $data_rangeto, $ID, $AggregationsStufe);
 
-						$data = array_reverse($data);
+                $dataVals = $this->GetArchivData($ID, $data_rangefrom, $data_rangeto, $agstufe, $typ, $additional_data);
+                if ($dataVals == false) {
+                    continue;
+                }
 
-						}
+                $count = count($dataVals);
+                $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "1. Versuch Data Count:" . $count, 0);
 
+                if ($count > $RecordLimit) {
+                    $agstufe = 6;
+                    $dataVals = $this->GetArchivData($ID, $data_rangefrom, $data_rangeto, $agstufe, $typ, $additional_data);
+                    $count = is_array($dataVals) ? count($dataVals) : 0;
+                    $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "2. Versuch Data Count:" . $count, 0);
+                }
 
-				if ($count > 0) 
-					{
-                    $string = $this->CreateReturnString($data, $target, $typ, $agstufe,$data_additional,$DataOffset,$TimeOffset,$additional_data);
-                    $this->SendDebug(__FUNCTION__."[".__LINE__."]", "Data String:".$string, 0);
+                if ($count > $RecordLimit || $count == 0) {
+                    $agstufe = 5;
+                    $dataVals = $this->GetArchivData($ID, $data_rangefrom, $data_rangeto, $agstufe, $typ, $additional_data);
+                    $count = is_array($dataVals) ? count($dataVals) : 0;
+                    $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "3. Versuch Data Count:" . $count, 0);
+                }
 
-                    $stringall = $stringall . "" .$string ;
-					};
-					
+                if ($count > $RecordLimit || $count == 0) {
+                    $agstufe = 0;
+                    $dataVals = $this->GetArchivData($ID, $data_rangefrom, $data_rangeto, $agstufe, $typ, $additional_data);
+                    $count = is_array($dataVals) ? count($dataVals) : 0;
+                    $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "4. Versuch Data Count:" . $count, 0);
+                }
 
+                if ($count > $RecordLimit) {
+                    $agstufe = 1;
+                    $dataVals = $this->GetArchivData($ID, $data_rangefrom, $data_rangeto, $agstufe, $typ, $additional_data);
+                    $count = is_array($dataVals) ? count($dataVals) : 0;
+                    $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "5. Versuch Data Count:" . $count, 0);
+                }
+
+                $DataOffset = $additional_data['DataOffset'];
+                $TimeOffset = $additional_data['TimeOffset'];
+
+                if (isset($additional_data['ReverseData']) && $additional_data['ReverseData'] == true) {
+                    $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Data Reverse.", 0);
+                    $dataVals = array_reverse($dataVals);
+                }
+
+                if ($count > 0) {
+                    $string = $this->CreateReturnString($dataVals, $target, $typ, $agstufe, $data_additional, $DataOffset, $TimeOffset, $additional_data);
+                    $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Data String:" . $string, 0);
+                    $stringall .= $string;
+                }
             }
 
-
-
-
-
-
-
-
-			// *************** Stoppuhr Ende
-			// $microtimesende = microtime(true);
-			// $microtime = $microtimesende - $microtimestart;
-			// $this->SendDebug(__FUNCTION__."[".__LINE__."]", "Microtime :".$microtime, 0);
-			// Ende neue Version
-
             $string = $this->CreateHeaderReturnString($stringall);
+            $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Data String ALL :" . $string, 0);
 
-            $this->SendDebug(__FUNCTION__."[".__LINE__."]", "Data String ALL :".$string, 0);
-		
-			/* 
-			if ( $string == "[]" )	// Keine Daten, dann auch nicht senden
-				{
-				$string = "[{}]";	
-				$this->SendDebug(__FUNCTION__."[".__LINE__."]", "Data String ALL leer:", 0);
-                // return;
-                }	
-			*/ 
-			
-			echo $string;
-			
-			$HookEndtime = time();
-			$HookLaufzeit = $HookEndtime - $HookStarttime; 
-			$this->SendDebug(__FUNCTION__."[".__LINE__."]", "Hook Endtime:".$this->TimestampToDate($HookEndtime), 0);
-			$this->SendDebug(__FUNCTION__."[".__LINE__."]", "Hook Laufzeit:".$HookLaufzeit. " Sekunden", 0);
+            header('Content-Type: application/json; charset=utf-8');
+            echo $string;
 
-            // $this->sendtest();
-			return;
+            $HookEndtime = time();
+            $HookLaufzeit = $HookEndtime - $HookStarttime;
+            $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Hook Endtime:" . $this->TimestampToDate($HookEndtime), 0);
+            $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Hook Laufzeit:" . $HookLaufzeit . " Sekunden", 0);
 
-			}
-		
+            return;
+        }
 
-		if ($data_app != "dashboard") 	
-			$this->SendDebug(__FUNCTION__."[".__LINE__."]","Unbekanntes Telegramm empfangen bzw Testtelegramm Raw:".$data,0);
-		
+        if ($data_app != "dashboard") {
+            $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Unbekanntes Telegramm empfangen bzw Testtelegramm Raw:" . $data, 0);
+        }
+    }
 
-		}
+    //******************************************************************************
+    // Additional JSON Data auswerten
+    //******************************************************************************
+    protected function GetAdditionalData($data)
+    {
+        $AdditionalData = array();
 
-	//******************************************************************************
-	//	Additional JSON Data auswerten
-	//******************************************************************************
-	protected function GetAdditionalData($data)
-		{
-		$AdditionalData = array();
+        $j = json_encode($data, true);
+        $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", $j, 0);
 
-		$j =  json_encode($data,true);
-		$this->SendDebug(__FUNCTION__."[".__LINE__."]", $j, 0);
+        if (is_array($data)) {
+            foreach ($data as $key => $value) {
+                $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Input-" . $key . "[" . $value . "]", 0);
+            }
+        }
 
-		if ( is_array($data ) )
-		foreach ($data as $key => $value)
-			{
-            $this->SendDebug(__FUNCTION__."[".__LINE__."]", "Input-".$key ."[" . $value . "]", 0);
-            }	
-			
-		if ( isset($data['Aggregationsstufe']) == false )
+        if (!isset($data['Aggregationsstufe']))
             $AdditionalData['Aggregationsstufe'] = -1;
-		else	 
-			$AdditionalData['Aggregationsstufe'] = 	$data['Aggregationsstufe'];	
+        else
+            $AdditionalData['Aggregationsstufe'] = $data['Aggregationsstufe'];
 
-		if ( isset($data['AggregationsAvg']) == true )
-			$AdditionalData['AggregationsAvg'] = $data['AggregationsAvg'];	
-		if ( isset($data['AggregationsMin']) == true )
-			$AdditionalData['AggregationsMin'] = $data['AggregationsMin'];	
-		if ( isset($data['AggregationsMax']) == true )
-			$AdditionalData['AggregationsMax'] = $data['AggregationsMax'];	
+        if (isset($data['AggregationsAvg']))
+            $AdditionalData['AggregationsAvg'] = $data['AggregationsAvg'];
+        if (isset($data['AggregationsMin']))
+            $AdditionalData['AggregationsMin'] = $data['AggregationsMin'];
+        if (isset($data['AggregationsMax']))
+            $AdditionalData['AggregationsMax'] = $data['AggregationsMax'];
 
-		if ( isset($data['LastValues']) == true )
-			$AdditionalData['LastValues'] = $data['LastValues'];
-		else	
-			$AdditionalData['LastValues'] = false;
+        if (isset($data['LastValues']))
+            $AdditionalData['LastValues'] = $data['LastValues'];
+        else
+            $AdditionalData['LastValues'] = false;
 
+        if (!isset($data['Resolution']))
+            $AdditionalData['Resolution'] = -1;
+        else
+            $AdditionalData['Resolution'] = $data['Resolution'];
 
-		if ( isset($data['Resolution']) == false )
-			$AdditionalData['Resolution'] = -1;
-		else	 
-			$AdditionalData['Resolution'] = $data['Resolution'];	
+        if (!isset($data['DataOffset']))
+            $AdditionalData['DataOffset'] = 0;
+        else
+            $AdditionalData['DataOffset'] = $data['DataOffset'];
 
-		if ( isset($data['DataOffset']) == false )
-			$AdditionalData['DataOffset'] = 0;
-		else	 
-			$AdditionalData['DataOffset'] = $data['DataOffset'];	
+        if (!isset($data['yoffset']))
+            $AdditionalData['Yoffset'] = 0;
+        else
+            $AdditionalData['Yoffset'] = $data['yoffset'];
 
-		if ( isset($data['yoffset']) == false )
-			$AdditionalData['Yoffset'] = 0;
-		else	 
-			$AdditionalData['Yoffset'] = $data['yoffset'];	
+        if (!isset($data['TimeOffset'])) {
+            $AdditionalData['TimeOffset'] = 0;
+            $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Output-TimeOffset false", 0);
+        } else {
+            $AdditionalData['TimeOffset'] = $data['TimeOffset'];
+            $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Output-TimeOffset : " . $AdditionalData['TimeOffset'], 0);
+        }
 
+        if (isset($data['DataFilter']))
+            $AdditionalData['DataFilter'] = $data['DataFilter'];
 
-		if ( isset($data['TimeOffset']) == false )
-			{
-			$AdditionalData['TimeOffset'] = 0;
-			$this->SendDebug(__FUNCTION__."[".__LINE__."]", "Output-TimeOffset false", 0); 
-			}
-		else	 
-			{
-			$AdditionalData['TimeOffset'] = $data['TimeOffset'];
-			$this->SendDebug(__FUNCTION__."[".__LINE__."]", "Output-TimeOffset : ".$AdditionalData['TimeOffset'], 0); 
-			}
-			
+        if (isset($data['ReverseData']))
+            $AdditionalData['ReverseData'] = $data['ReverseData'];
 
+        foreach ($AdditionalData as $key => $value) {
+            $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Output-" . $key . "[" . $value . "]", 0);
+        }
 
+        return $AdditionalData;
+    }
 
-		if ( isset($data['DataFilter']) == true )
-			$AdditionalData['DataFilter'] = $data['DataFilter'];
+    //******************************************************************************
+    //  Aggregationsstufe fuer Zeitraeume festlegen
+    //******************************************************************************
+    protected function CheckZeitraumForAggregatedValues($from, $to, $varID, $AggregationsStufe)
+    {
+        GLOBAL $data_panelId;
 
-		if ( isset($data['ReverseData']) == true )
-			$AdditionalData['ReverseData'] = $data['ReverseData'];
+        switch ($AggregationsStufe) {
+            case 0:
+                $this->SendDebug(__FUNCTION__ . '[' . __LINE__ . ']', "Stuendliche Aggregation", 0);
+                break;
+            case 1:
+                $this->SendDebug(__FUNCTION__ . '[' . __LINE__ . ']', "Taegliche Aggregation", 0);
+                break;
+            case 2:
+                $this->SendDebug(__FUNCTION__ . '[' . __LINE__ . ']', "Woechentliche Aggregation", 0);
+                break;
+            case 3:
+                $this->SendDebug(__FUNCTION__ . '[' . __LINE__ . ']', "Monatliche Aggregation", 0);
+                break;
+            case 4:
+                $this->SendDebug(__FUNCTION__ . '[' . __LINE__ . ']', "Jaehrliche Aggregation", 0);
+                break;
+            case 5:
+                $this->SendDebug(__FUNCTION__ . '[' . __LINE__ . ']', "5-Minuetige Aggregation", 0);
+                break;
+            case 6:
+                $this->SendDebug(__FUNCTION__ . '[' . __LINE__ . ']', "1-Minuetige Aggregation", 0);
+                break;
+            case 99:
+                $this->SendDebug(__FUNCTION__ . '[' . __LINE__ . ']', "Maximale Aufloesung", 0);
+                break;
+            case -1:
+                $this->SendDebug(__FUNCTION__ . '[' . __LINE__ . ']', "Keine Aggregation uebergeben", 0);
+                break;
+            default:
+                $this->SendDebug(__FUNCTION__ . '[' . __LINE__ . ']', "Aggregation unbekannt", 0);
+        }
 
-			
+        $archiv = $this->GetArchivID();
+        $aggType = AC_GetAggregationType($archiv, $varID);
 
-		foreach ($AdditionalData as $key => $value)
-			{
-            $this->SendDebug(__FUNCTION__."[".__LINE__."]", "Output-".$key ."[" . $value . "]", 0);
-            }	
-			
+        $stufe = 99;
 
+        $days = ($to - $from) / (3600 * 24);
+        $hours = ($to - $from) / (3600);
 
-		return $AdditionalData;
-
-        }	
-
-	//******************************************************************************
-	//	Teststring erstellen und senden
-	//******************************************************************************
-	protected function sendtest()
-		{
-
-		$t1 = ( time() -3600)*1000;		
-		$t2 = ( time() -600)*1000;		
-
-		$s = '[{"target":"pps in","datapoints":[[122,'.$t1.'],[565,'.$t2.']]}]';
-
-		$this->SendDebug(__FUNCTION__."[".__LINE__."]",$s,0);
-
-		}
-	
-		
-	//******************************************************************************
-	// 	Aggregationsstufe fuer Zeitraeume festlegen
-	//  Stufe -1    kein Additional JSON Data uebergeben
-	//	Stufe 0		Stuendliche Aggregation
-	// 	Stufe 1		Taegliche Aggregation
-	// 	Stufe 2		Woechentliche Aggregation
-	// 	Stufe 3		Monatliche Aggregation
-	//  Stufe 4		Jaehrliche Aggregation
-	//  Stufe 5		5-Minuetige Aggregation
-	//  Stufe 6		1-Minuetige Aggregation
-	// 	Stufe 99	keine Aggregation ( maximale Aufloesung mit mehreren Vesuchen )
-	//******************************************************************************	
-	protected function CheckZeitraumForAggregatedValues($from,$to,$varID,$AggregationsStufe)
-		{
-
-		GLOBAL $data_panelId;
-
-		switch ( $AggregationsStufe )
-			{
-				case 0		:	$this->SendDebug(__FUNCTION__.'['.__LINE__.']', "Stuendliche Aggregation", 0);
-								break;
-				case 1		:	$this->SendDebug(__FUNCTION__.'['.__LINE__.']', "Taegliche Aggregation", 0);
-								break;
-				case 2		:	$this->SendDebug(__FUNCTION__.'['.__LINE__.']', "Woechentliche Aggregation", 0);
-								break;
-				case 3		:	$this->SendDebug(__FUNCTION__.'['.__LINE__.']', "Monatliche Aggregation", 0);
-								break;
-				case 4		:	$this->SendDebug(__FUNCTION__.'['.__LINE__.']', "Jaehrliche Aggregation", 0);
-								break;
-				case 5		:	$this->SendDebug(__FUNCTION__.'['.__LINE__.']', "5-Minuetige Aggregation", 0);
-								break;
-				case 6		:	$this->SendDebug(__FUNCTION__.'['.__LINE__.']', "1-Minuetige Aggregation", 0);
-								break;
-				case 99		:	$this->SendDebug(__FUNCTION__.'['.__LINE__.']', "Maximale Aufloesung", 0);
-								break;
-				case -1		:	$this->SendDebug(__FUNCTION__.'['.__LINE__.']', "Keine Aggregation uebergeben", 0);
-								break;
-
-
-				default		:	$this->SendDebug(__FUNCTION__.'['.__LINE__.']', "Aggregation unbekannt", 0);				
-
-			}	
-		$archiv = $this->GetArchivID();
-		$aggType = AC_GetAggregationType($archiv,$varID);
-
-		$stufe = 99;
-		
-		$days = ($to-$from)/(3600*24);	
-		$hours = ($to-$from)/(3600);
-
-		if ($aggType == 0) 		// Standard bei -1
-			{
-			if ($days > 7) 
-				{
+        if ($aggType == 0) {
+            if ($days > 7) {
                 $stufe = 0;
-            	}
-			if ($days > 100) 
-				{
+            }
+            if ($days > 100) {
                 $stufe = 1;
-            	}
-			}
+            }
+        }
 
-		if ($aggType == 1) 		// Zaehler bei -1
-			{
-			$stufe = 0;	
-			if ( $hours < 2 )
-				$stufe = 5;
+        if ($aggType == 1) {
+            $stufe = 0;
+            if ($hours < 2)
+                $stufe = 5;
 
-			if( $days > 2 )
-				$stufe = 1;	
-			if( $days > 30 )
-				$stufe = 2;		
-			}
-		
-		// $AggregationsStufe hat Vorrang vor Standard ( -1 )
-		if ($AggregationsStufe >= 0 and $AggregationsStufe <= 6 )
-			$stufe = $AggregationsStufe;			
-		if ($AggregationsStufe == 99 )
-			$stufe = $AggregationsStufe;			
-			
-		$s = "Anzahl Tage:".$days . " Aggreagationsstufe:".$stufe ." Aggregationstype:".$aggType;
+            if ($days > 2)
+                $stufe = 1;
+            if ($days > 30)
+                $stufe = 2;
+        }
 
+        if ($AggregationsStufe >= 0 && $AggregationsStufe <= 6)
+            $stufe = $AggregationsStufe;
+        if ($AggregationsStufe == 99)
+            $stufe = $AggregationsStufe;
 
-		$this->SendDebug(__FUNCTION__."[".__LINE__."]",$s,0);
-		$this->Logging($s,$data_panelId);
+        $s = "Anzahl Tage:" . $days . " Aggreagationsstufe:" . $stufe . " Aggregationstype:" . $aggType;
 
-		return $stufe;
+        $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", $s, 0);
+        $this->Logging($s, $data_panelId);
 
-		}	
+        return $stufe;
+    }
 
-	//******************************************************************************
-	//	alle geloggten Variablen an Grafana senden ( Request Metrics )
-	//******************************************************************************
-	protected function ReturnMetrics($data_target)
-		{
-			
-		//$s = $data_target;
-		//$this->SendDebug(__FUNCTION__."[".__LINE__."]",$s,0);
+    //******************************************************************************
+    //  alle geloggten Variablen an Grafana senden ( Request Metrics )
+    //  NOTE: returns JSON string (kept for backward compatibility)
+    //******************************************************************************
+    protected function ReturnMetrics($data_target)
+    {
+        $archiv = $this->GetArchivID();
+        $varList = IPS_GetVariableList();
 
-		$archiv = $this->GetArchivID();
-		$varList = IPS_GetVariableList ();
+        sort($varList);
 
-		sort($varList);
+        $string = '[';
 
-		$string = '[';
+        foreach ($varList as $var) {
+            $status = AC_GetLoggingStatus($archiv, $var);
+            if ($status == true) {
+                $name = IPS_GetName($var);
+                $name = str_replace("'", '"', $name);
+                $name = addslashes($name);
 
-		foreach ($varList as $var )
-			{
-				$status = AC_GetLoggingStatus($archiv,$var);
-				if ( $status == true )
-					{
-					
-					$name = IPS_GetName($var);
-					$name = str_replace("'",'"',$name);
-					$name = addslashes($name);
-					$parent = IPS_GetParent($var);
-					$parent = IPS_GetName($parent);
-					$parent = str_replace("'",'"',$parent);
-					$parent = addslashes($parent);	
-					$metrics = $var.",".$name."[".$parent."]";
+                $parent = IPS_GetParent($var);
+                $parent = IPS_GetName($parent);
+                $parent = str_replace("'", '"', $parent);
+                $parent = addslashes($parent);
 
-					// Filterung der Eingabe
-					if ( $data_target != "" )	// Kein Filter
-						{
-						$found = stripos($metrics,$data_target);
-						if ( $found === false )
-							{
-							$s = "false";	
-							//if ( $data_target =! false )
-							continue;
-							// $this->SendDebug(__FUNCTION__."[".__LINE__."]",$s,0);
-							}	
-						else
-							{
-							$s = "true";	
-							// $this->SendDebug(__FUNCTION__."[".__LINE__."]",$s,0);
-							}	
-						}
+                $metrics = $var . "," . $name . "[" . $parent . "]";
 
-
-					$string = $string .'"'.$metrics.'",';	
-
-					}
-
-			}
-		
-		$string = substr($string, 0, -1);
-		$string = $string .']';
-		
-		$this->SendDebug(__FUNCTION__."[".__LINE__."]",$string,0);
-
-		return $string;	
-
-		}		
-
-	//******************************************************************************
-	//	Rueckgabewerte fuer eine Variable erstellen
-	//******************************************************************************
-	protected function CreateReturnString($data,$target,$typ,$agstufe,$data_data,$DataOffset,$TimeOffset,$additional_data)
-		{
-		
-		$offset = 0;
-	
-		$offset = floatval($DataOffset);
-		$s = "Y-Offsetwert neu:".$offset;
-		// $this->SendDebug(__FUNCTION__."[".__LINE__."]",$s,0);
-	
-
-		if(isset($additional_data['Yoffset']))
-        	{
-			$offset = $additional_data['Yoffset'];
-			$s = "Y-Offsetwert neu:".$offset;
-			$this->SendDebug(__FUNCTION__."[".__LINE__."]",$s,0);
-			}
-
-		
-		/*			
-		if ( isset($data_data['additional']) == true )
-			{
-				$this->SendDebug(__FUNCTION__."[".__LINE__."]","------",0);
-
-			if ( $data_data['additional'] == 'yoffset' )
-				if ( isset($data_data['value']) == true )
-					{
-					$offset = floatval($data_data['value']);
-					$s = "Y-Offsetwert alt:".$offset;
-					$this->SendDebug(__FUNCTION__."[".__LINE__."]",$s,0);
-
-					}	
-				}
-		*/		
-					
-		$target = addslashes($target);
-
-		$string = '{"target":"'.$target.'","datapoints":[';
-			
-		foreach($data as $value)	
-			{
-			 
-							
-			// Kein Offset zZ bei nicht Booleans
-			// if ($agstufe == 99) 
-
-			if (isset($value['Value'])) 
-				{
-                if(isset($additional_data['DataFilter']))
-                    {
-                   $filter = $additional_data['DataFilter'];    
- 
-                   $v = str_replace(",", ".", $value['Value']);
-                   if ( $filter > $v)   // sinvoll ?
+                if ($data_target != "") {
+                    $found = stripos($metrics, $data_target);
+                    if ($found === false) {
                         continue;
                     }
-                else 
-                    {
-                    $v = str_replace(",",".",$value['Value']);
-                    }
-                }		
+                }
 
-           else
-				{
-				// Aggregation
-				// IPS_LogMessage(__FUNCTION__."[".__LINE__."]","");
+                $string = $string . '"' . $metrics . '",';
+            }
+        }
 
-				$min = false;
-				$max = false;
-				$avg = false;
+        // avoid invalid JSON if no entries matched
+        if ($string !== '[') {
+            $string = substr($string, 0, -1);
+        }
+        $string = $string . ']';
 
-				$avg = @$value['Avg'];	
-				$min = @$value['Min'];	
-				$max = @$value['Max'];	
-				$avg = str_replace(",",".",$avg);
-				$min = str_replace(",",".",$min);
-				$max = str_replace(",",".",$max);
-				
-				$v = $avg;
-				
-				
-				if ( isset($additional_data['AggregationsMin']) == true )
-				    if ( $min != false )
-						$v = $min;
-				if ( isset($additional_data['AggregationsMax']) == true )
-					if ( $max != false )
-						$v = $max;
-						
-				}	
+        $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", $string, 0);
+        return $string;
+    }
 
-			// Boolean	
-			if ( $typ == 0 )		
-				{
-				if ($v == true) 
-					{
-					$v = 1;
-					$vorher = $v;
-					$v = $v + $offset;
-					
-					$s = "V + True Offset vorher nachher :".$vorher. "-" . $v;
-					// $this->SendDebug(__FUNCTION__."[".__LINE__."]",$s,0);
-					$v = str_replace(",", ".", $v);
-					}
-				else
-					{
-					$v = 0;
-					$vorher = $v;
+    //******************************************************************************
+    //  Rueckgabewerte fuer eine Variable erstellen
+    //******************************************************************************
+    protected function CreateReturnString($data, $target, $typ, $agstufe, $data_data, $DataOffset, $TimeOffset, $additional_data)
+    {
+        $offset = floatval($DataOffset);
 
-					$v = $v + $offset;
-					$s = "V + False Offset vorher nachher :".$vorher. "-" . $v;
-					// $this->SendDebug(__FUNCTION__."[".__LINE__."]",$s,0);
-					$v = str_replace(",", ".", $v);
-					}	
-				}
+        if (isset($additional_data['Yoffset'])) {
+            $offset = $additional_data['Yoffset'];
+            $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Y-Offsetwert neu:" . $offset, 0);
+        }
 
-			
-			// $Timestamp = $value['TimeStamp'] - intval($TimeOffset);	
+        $target = addslashes($target);
+        $string = '{"target":"' . $target . '","datapoints":[';
 
-			if ( $TimeOffset == 0 )
-				{
-				$Timestamp = $value['TimeStamp'];
-				}
-			else
-				{
-				// Zeitstempel muss in die "Zukunft" verarbeitet werden
-				$Timestamp = $value['TimeStamp'] + intval($TimeOffset);
+        foreach ($data as $value) {
+            if (isset($value['Value'])) {
+                if (isset($additional_data['DataFilter'])) {
+                    $filter = $additional_data['DataFilter'];
+                    $v = str_replace(",", ".", $value['Value']);
+                    if ($filter > $v)
+                        continue;
+                } else {
+                    $v = str_replace(",", ".", $value['Value']);
+                }
+            } else {
+                $min = @$value['Min'];
+                $max = @$value['Max'];
+                $avg = @$value['Avg'];
 
-				}
-				
-			
-			
-			$t = $this->TimestampToGrafanaTime($Timestamp);	
-			$string = $string ."[" .$v.",".$t."],";		
+                $avg = str_replace(",", ".", $avg);
+                $min = str_replace(",", ".", $min);
+                $max = str_replace(",", ".", $max);
 
-			}
-		$string = substr($string, 0, -1);
-		$string = $string . "]},";
+                $v = $avg;
 
-		return $string;
+                if (isset($additional_data['AggregationsMin']) == true && $min != false)
+                    $v = $min;
+                if (isset($additional_data['AggregationsMax']) == true && $max != false)
+                    $v = $max;
+            }
 
-		}
-		
+            if ($typ == 0) {
+                if ($v == true) {
+                    $v = 1;
+                    $v = $v + $offset;
+                    $v = str_replace(",", ".", $v);
+                } else {
+                    $v = 0;
+                    $v = $v + $offset;
+                    $v = str_replace(",", ".", $v);
+                }
+            }
 
-	//******************************************************************************
-	//	endgueltigen String erstellen
-	//******************************************************************************
-	protected function CreateHeaderReturnString($string)
-		{
+            if ($TimeOffset == 0) {
+                $Timestamp = $value['TimeStamp'];
+            } else {
+                $Timestamp = $value['TimeStamp'] + intval($TimeOffset);
+            }
 
-		$string = substr($string, 0, -1);	
+            $t = $this->TimestampToGrafanaTime($Timestamp);
+            $string = $string . "[" . $v . "," . $t . "],";
+        }
 
-		$string = "[".$string."]";
+        if ($string !== '{"target":"' . $target . '","datapoints":[') {
+            $string = substr($string, 0, -1);
+        }
+        $string = $string . "]},";
 
-		return $string;
+        return $string;
+    }
 
-		}	
+    //******************************************************************************
+    // endgueltigen String erstellen
+    //******************************************************************************
+    protected function CreateHeaderReturnString($string)
+    {
+        if ($string !== "") {
+            $string = substr($string, 0, -1);
+        }
+        $string = "[" . $string . "]";
+        return $string;
+    }
 
-	//******************************************************************************
-	//	Werte einer Variablen aus dem Archiv holen
-	//******************************************************************************
-	protected function GetArchivData($id,$from,$to,$agstufe,$typ,$additional_data)
-		{
-		
-		GLOBAL $data_panelId;
+    //******************************************************************************
+    // Werte einer Variablen aus dem Archiv holen
+    //******************************************************************************
+    protected function GetArchivData($id, $from, $to, $agstufe, $typ, $additional_data)
+    {
+        GLOBAL $data_panelId;
 
-		$werte = array();
+        $archiv = $this->GetArchivID();
 
-		$archiv = $this->GetArchivID();
+        $status = AC_GetLoggingStatus($archiv, $id);
+        $arrayVar = IPS_GetVariable($id);
+        $typ = $arrayVar['VariableType'];
 
-		$status = AC_GetLoggingStatus ($archiv, $id);
-		$arrayVar =  IPS_GetVariable($id);
-		$typ = $arrayVar['VariableType'];
+        if ($status == FALSE) {
+            $aktuell = GetValue($id);
 
-		if ( $status == FALSE )
-			{
-			$aktuell = 	GetValue($id);
-			
-			$s = " Variable wird nicht geloggt : ".$id . " aktuellen Wert nehmen: ".$aktuell;	
-			$this->SendDebug(__FUNCTION__."[".__LINE__."]",$s,0);
-			$reversed = array();
-	
-			if ( $typ == 3 )	// String
-				{
-				// $aktuell = "String";
-				$aktuell = '"'.$aktuell.'"';
-				
-				}
+            $s = " Variable wird nicht geloggt : " . $id . " aktuellen Wert nehmen: " . $aktuell;
+            $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", $s, 0);
 
-			
-			array_push($reversed, array("TimeStamp"=>$to,"Value"=>$aktuell));
-			// return FALSE;
-			return $reversed;
+            $reversed = array();
 
-			}	
+            if ($typ == 3) {
+                $aktuell = '"' . $aktuell . '"';
+            }
 
+            array_push($reversed, array("TimeStamp" => $to, "Value" => $aktuell));
+            return $reversed;
+        }
 
-		// 0 = Standard
-		// 1 = Zaehler
-		$aggType = AC_GetAggregationType($archiv,$id);
+        $aggType = AC_GetAggregationType($archiv, $id);
 
-		$limit = 0;
-		if ( isset($additional_data['LastValues']) == true )
-			$limit = $additional_data['LastValues'];
-		$limit = 0;	
+        $limit = 0;
+        if (isset($additional_data['LastValues']) == true)
+            $limit = $additional_data['LastValues'];
+        $limit = 0;
 
-		if ($agstufe == 99) 
-			{
-			
-			$s = "GetloggedValues:".$id." - ".$this->TimestampToDate($from)." - ".$this->TimestampToDate($to). " - Limit : ".$limit;	
-			$this->SendDebug(__FUNCTION__."[".__LINE__."]",$s,0);
-			$this->Logging($s,$data_panelId);
-			$werte = AC_GetLoggedValues($archiv, $id, $from, $to, $limit);
-			$this->SendDebug(__FUNCTION__."[".__LINE__."]","Count: ".@count($werte),0);
-			// print_r($werte);
-			}
-		else
-			{
-			$s = "GetAggregatedValues:".$agstufe."-".$archiv."-".$id."- von:".$this->TimestampToDate($from)."- bis:".$this->TimestampToDate($to);	
-			$this->SendDebug(__FUNCTION__."[".__LINE__."]",$s,0);
-			$this->Logging($s,$data_panelId);
-			$werte = @AC_GetAggregatedValues ($archiv,$id,$agstufe,$from,$to,0);	
-			}	
+        if ($agstufe == 99) {
+            $s = "GetloggedValues:" . $id . " - " . $this->TimestampToDate($from) . " - " . $this->TimestampToDate($to) . " - Limit : " . $limit;
+            $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", $s, 0);
+            $this->Logging($s, $data_panelId);
+            $werte = AC_GetLoggedValues($archiv, $id, $from, $to, $limit);
+            $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Count: " . @count($werte), 0);
+        } else {
+            $s = "GetAggregatedValues:" . $agstufe . "-" . $archiv . "-" . $id . "- von:" . $this->TimestampToDate($from) . "- bis:" . $this->TimestampToDate($to);
+            $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", $s, 0);
+            $this->Logging($s, $data_panelId);
+            $werte = @AC_GetAggregatedValues($archiv, $id, $agstufe, $from, $to, 0);
+        }
 
-		if ( is_array($werte) == false )
-			{
-			$s = "Kein Result : ";	
-			$this->SendDebug(__FUNCTION__."[".__LINE__."]",$s,0);	
-			return false;
+        if (!is_array($werte)) {
+            $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Kein Result : ", 0);
+            return false;
+        }
 
-			}
+        $reversed = array_reverse($werte);
+        $count = count($werte);
 
-		$reversed = array_reverse($werte);
-		
-		$count = count($werte);
+        $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Anzahl der Werte : " . $count, 0);
 
-		$s = "Anzahl der Werte : ".$count;	
-		$this->SendDebug(__FUNCTION__."[".__LINE__."]",$s,0);	
+        if ($aggType == 0) {
+            $letzter_Wert = @AC_GetLoggedValues($archiv, $id, 0, $to, 1)[0]['Value'];
 
-		// LastValues erarbeiten
-		if ( isset($additional_data['LastValues']) == true )
-			{
-			$s = "LastValues Return : ";	
-			$this->SendDebug(__FUNCTION__."[".__LINE__."]",$s,0);	
-		
-			// return $reversed;
-			}
+            $erster_Wert  = @AC_GetLoggedValues($archiv, $id, 0, $from - 1, 1);
+            $erster_WertOK = false;
 
-		
-		if ( $aggType ==1 )
-		{
-		 // Neuesten Wert loeschen.Wegen Anzeige.Werte sind noch nicht komplett
-		 // array_pop($reversed);
-		}	
+            if ($erster_Wert != false) {
+                $erster_Wert = $erster_Wert[0]['Value'];
+                $erster_WertOK = true;
+            } else {
+                $erster_Wert = false;
+                $erster_WertOK = false;
+            }
+        } else {
+            $letzter_Wert = false;
+            $erster_Wert = false;
+            $erster_WertOK = false;
+        }
 
-		$erster_Wert = 0;
-		$letzter_Wert = 0;
+        if ($letzter_Wert == false) {
+            $letzter_Wert = GetValue($id);
+            $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Noch keine Daten geloggt aktueller Wert :" . $letzter_Wert . " ID:" . $id, 0);
+        }
 
-		if ($aggType == 0) 
-			{
-			// Problem da aktueller Wert genommen wird ( Gestern )	
-			// $letzter_Wert = @AC_GetLoggedValues($archiv, $id, 0, 0, 1)[0]['Value'];
-			// $to Zeit nehmen fuer letzten Wert
-			$letzter_Wert = @AC_GetLoggedValues($archiv, $id, 0, $to, 1)[0]['Value'];
-			
-			
-			$array = AC_GetLoggedValues($archiv, $id, 0, 0, 1);
-			
-            $erster_Wert  = @AC_GetLoggedValues($archiv, $id, 0, $from-1, 1);	// erster Wert vorhanden ?
-			$s = "Erster Wert: OK [";
-			// Wenn es im Zeitbereich keinen ersten Wert gibt dann auf FALSE
-			if ( $erster_Wert != false )
-				{
-				$erster_Wert = $erster_Wert[0]['Value'];
-				$erster_WertOK = true;
-				$s = "Erster Wert:[".$erster_Wert."] - Letzter Wert:[".$letzter_Wert."]";
-				$this->SendDebug(__FUNCTION__."[".__LINE__."]",$s,0);
-		
-				}
-			else
-				{
-				$erster_Wert = false; 
-				$erster_WertOK = false;
-				}		
-				
-			}
-		
-			
-		if ( $letzter_Wert == false ) // noch keine Daten geloggt/aktuellen Wert nehmen
-			{
-			$letzter_Wert = GetValue($id);
-			$s = "Noch keine Daten geloggt aktueller Wert :".$letzter_Wert. " ID:".$id;
-			$this->SendDebug(__FUNCTION__."[".__LINE__."]",$s,0);
-			}	
+        $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Erster Wert:[" . $erster_Wert . "] - Letzter Wert:[" . $letzter_Wert . "]", 0);
 
-		$s = "Erster Wert:[".$erster_Wert."] - Letzter Wert:[".$letzter_Wert."]";
-		$this->SendDebug(__FUNCTION__."[".__LINE__."]",$s,0);
+        if ($aggType == 0) {
+            if ($agstufe == 99) {
+                array_push($reversed, array("TimeStamp" => $to, "Value" => $letzter_Wert));
+            } else {
+                array_push($reversed, array("TimeStamp" => $to, "Avg" => $letzter_Wert));
+            }
 
+            if ($erster_WertOK != false) {
+                if ($agstufe == 99) {
+                    array_unshift($reversed, array("TimeStamp" => $from, "Value" => $erster_Wert));
+                } else {
+                    array_unshift($reversed, array("TimeStamp" => $from, "Avg" => $erster_Wert));
+                }
+            }
+        }
 
-		if ($aggType == 0)	// Bei Zaehler keine erster/letzter Wert wegen komischer Anzeige (kleine Balken)
-			{
-            // Damit Graph bis zum Ende geht
-			if ($agstufe == 99)
-				{
-                array_push($reversed, array("TimeStamp"=>$to,"Value"=>$letzter_Wert));
-				} 
-			else 
-				{
-                array_push($reversed, array("TimeStamp"=>$to,"Avg"=>$letzter_Wert));
-            	}
-        
-            // Damit Graph bis zum Anfang geht ( $erster_Wert kann aber false sein !)
-			if ($erster_WertOK != false) 
-				{
-				if ($agstufe == 99) 
-					{
-                    array_unshift($reversed, array("TimeStamp"=>$from,"Value"=>$erster_Wert));
-					} 
-				else
-					{
-                    array_unshift($reversed, array("TimeStamp"=>$from,"Avg"=>$erster_Wert));
-					}
-					
-				}
-				
-        	}		
+        if ($typ == 3) {
+            $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Achtung Wert sind Strings", 0);
+            foreach ($reversed as $key => $value) {
+                if (isset($value['Value'])) {
+                    $str = $value['Value'];
+                    $reversed[$key]['Value'] = '"' . $str . '"';
+                }
+            }
+        }
 
-		if ( $typ == 3 )		// Stringwerte
-			{
-			$s = "Achtung Wert sind Strings ";
-			$this->SendDebug(__FUNCTION__."[".__LINE__."]",$s,0);
-	
-			foreach($reversed as $key => $value)
-				{
-				if ( isset($value['Value'] ))	
-					{
-					$str = 	$value['Value'];
-					$str = '"'.$str.'"';
-					
-					$reversed[$key]['Value'] = $str;
-					}
+        return $reversed;
+    }
 
-				}	
+    //******************************************************************************
+    // Time helpers
+    //******************************************************************************
+    protected function TimestampToGrafanaTime($time)
+    {
+        return $time * 1000;
+    }
 
-			}	
+    protected function TimestampToDate($time)
+    {
+        return date('d.m.Y H:i:s', $time);
+    }
 
-		return $reversed;
-		}
+    //******************************************************************************
+    // Archiv ID
+    //******************************************************************************
+    protected function GetArchivID()
+    {
+        $guid = "{43192F0B-135B-4CE7-A0A7-1475603F3060}";
+        $array = IPS_GetInstanceListByModuleID($guid);
+        $archive_id = @$array[0];
 
-	//******************************************************************************
-	// 	wandelt einen Timestamp in GrafanaTime ( Millisekunden )	
-	//******************************************************************************
-	protected function TimestampToGrafanaTime($time)
-		{
-		return $time * 1000;
-		}
+        if (!isset($archive_id)) {
+            $this->Logmessage("Archive Control nicht gefunden!", KL_WARNING);
+            return false;
+        }
 
-	//******************************************************************************
-	//	wandelt Timestamp in Datum/Uhrzeit
-	//******************************************************************************
-	protected function TimestampToDate($time)
-		{
-		return date('d.m.Y H:i:s',$time);			
-		}
+        return $archive_id;
+    }
 
-	//******************************************************************************
-	//	Ermittelt die Archiv ID
-	//******************************************************************************
-	protected function GetArchivID()
-		{
+    //******************************************************************************
+    // Variable check
+    //******************************************************************************
+    protected function CheckVariable($var)
+    {
+        if (is_numeric($var) == false) {
+            $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Variable ist keine Zahl : " . $var, 0);
+            $this->Logmessage("Grafana Variable ID " . $var . " Fehler !", KL_WARNING);
+            return false;
+        }
 
-		$guid = "{43192F0B-135B-4CE7-A0A7-1475603F3060}";
+        $status = IPS_VariableExists($var);
+        return $status;
+    }
 
-		$array = IPS_GetInstanceListByModuleID($guid);
-
-		$archive_id =  @$array[0];
-
-		if ( !isset($archive_id) )
-			{
-			$this->Logmessage("Archive Control nicht gefunden!",KL_WARNING);
-			return false;
-			}
-		
-		return $archive_id;
-
-		}
-
-
-	//******************************************************************************
-	//	Variable ueberpruefen (existiert/geloggt/OK)
-	//******************************************************************************
-	protected function CheckVariable($var)
-		{
-		GLOBAL $data_panelId;
-
-		$archiv = $this->GetArchivID();
-		
-		if ( is_numeric($var) == false )
-			{
-			$this->SendDebug(__FUNCTION__."[".__LINE__."]","Variable ist keine Zahl : ". $var, 0);
-			$this->Logmessage("Grafana Variable ID ".$var." Fehler !",KL_WARNING);
-			return false;	
-			}
-
-
-		$status = IPS_VariableExists($var);
-		
-		// Testen ob Variable isValid
-		$arr = AC_GetAggregationVariables ($archiv, false);
-		if ( $arr == true )
-			{
-			/* if ( isset($arr['VariableID'] == $var) )
-				{
-				if ( isset($arr['IsValid']) )	
-					{
-
-					}
-
-				}	
-*/
-			}
-
-		// rausgenommen,wenn nicht geloggt wird letzter Wert genommen (Gauge)
-		/*
-		if ( $status == true )
-			$status = AC_GetLoggingStatus($archiv,$var);
-		
-		if ( $status == false )
-			$this->Logmessage("Grafana Variable ID ".$var." Fehler ! Wird nicht geloggt",KL_WARNING);
-		*/ 
-			
-		return $status;
-		}
-	
     //**************************************************************************
-	// Logging
-	//**************************************************************************
-	private function Logging($Text,$file="Grafana",$delete=false,$date=true)
-		{
+    // Logging (unchanged; currently returns immediately)
+    //**************************************************************************
+    private function Logging($Text, $file = "Grafana", $delete = false, $date = true)
+    {
+        return;
 
-			return;
-		if ( $this->ReadPropertyBoolean("Logging") == false )
-			return;
+        if ($this->ReadPropertyBoolean("Logging") == false)
+            return;
 
-		$ordner = IPS_GetLogDir() . "Grafana";
-		if ( !is_dir ( $ordner ) )
-			mkdir($ordner);
+        $ordner = IPS_GetLogDir() . "Grafana";
+        if (!is_dir($ordner))
+            mkdir($ordner);
 
-		if ( !is_dir ( $ordner ) )
-			return;
-                
-		$time = date("d.m.Y H:i:s");
-		$logdatei = IPS_GetLogDir() . "Grafana/".$file.".log";
-		
-                if ( $delete == true )
-                    @unlink($logdatei);
-                
-				$datei = fopen($logdatei,"a+");
-		
-		if ( $date == true )		
-			fwrite($datei, $time ." ". $Text . chr(13));
-		else
-			fwrite($datei,$Text . chr(13));
-		
-		fclose($datei);
-		
-		}
+        if (!is_dir($ordner))
+            return;
 
+        $time = date("d.m.Y H:i:s");
+        $logdatei = IPS_GetLogDir() . "Grafana/" . $file . ".log";
 
-	//******************************************************************************
-	//	Erstelle Hook
-	//******************************************************************************
-	protected function SubscribeHook($hook)
-		{
-		$WebHook = "/hook/Grafana".$hook;
+        if ($delete == true)
+            @unlink($logdatei);
 
-		$ids = IPS_GetInstanceListByModuleID('{015A6EB8-D6E5-4B93-B496-0D3F77AE9FE1}');
-		if (count($ids) > 0) 
-			{
-			$hooks = json_decode(IPS_GetProperty($ids[0], 'Hooks'), true);
-			$found = false;
-			foreach ($hooks as $index => $hook) 
-				{
-				if ($hook['Hook'] == $WebHook) 
-					{
-					if ($hook['TargetID'] == $this->InstanceID) 
-						{
-						$this->SendDebug(__FUNCTION__."[".__LINE__."]","Hook bereits vorhanden : ". $hook['TargetID'], 0);
-						return;		// bereits vorhanden
-						}
-					$hooks[$index]['TargetID'] = $this->InstanceID;
-					$found = true;
-					}
-				}
-				
-				if (!$found) 
-					{
-					$hooks[] = ['Hook' => $WebHook, 'TargetID' => $this->InstanceID];
-					}
-				$this->SendDebug(__FUNCTION__."[".__LINE__."]", $WebHook ." erstellt" , 0);
-				IPS_SetProperty($ids[0], 'Hooks', json_encode($hooks));
-				IPS_ApplyChanges($ids[0]);
-			}
-		}
+        $datei = fopen($logdatei, "a+");
 
-	//******************************************************************************
-	// Hook loeschen
-	//******************************************************************************
-	protected function UnregisterHook($hook)
-		{
-		$WebHook = "/hook/Grafana".$hook;
+        if ($date == true)
+            fwrite($datei, $time . " " . $Text . chr(13));
+        else
+            fwrite($datei, $Text . chr(13));
 
-		$ids = IPS_GetInstanceListByModuleID('{015A6EB8-D6E5-4B93-B496-0D3F77AE9FE1}');
-		if (count($ids) > 0)
-			{
-			$hooks = json_decode(IPS_GetProperty($ids[0], 'Hooks'), true);
-			$found = false;
-			foreach ($hooks as $index => $hook)
-				{
-				if ($hook['Hook'] == $WebHook)
-					{
-					$found = $index;
-					break;
-					}
-				}
-	
-			if ($found !== false)
-				{
-				array_splice($hooks, $index, 1);
-				IPS_SetProperty($ids[0], 'Hooks', json_encode($hooks));
-				IPS_ApplyChanges($ids[0]);
-				}
-			}
-		}
+        fclose($datei);
+    }
 
+    //******************************************************************************
+    // Hook management
+    //******************************************************************************
+    protected function SubscribeHook($hook)
+    {
+        $WebHook = "/hook/Grafana" . $hook;
 
-	//**************************************************************************
-	// 	Module loeschen
-	//**************************************************************************
-	public function Destroy()
-		{
-		
-		if (!IPS_InstanceExists($this->InstanceID)) // Instanz wurde eben gelöscht und existiert nicht mehr
-			{
+        $ids = IPS_GetInstanceListByModuleID('{015A6EB8-D6E5-4B93-B496-0D3F77AE9FE1}');
+        if (count($ids) > 0) {
+            $hooks = json_decode(IPS_GetProperty($ids[0], 'Hooks'), true);
+            $found = false;
+            foreach ($hooks as $index => $h) {
+                if ($h['Hook'] == $WebHook) {
+                    if ($h['TargetID'] == $this->InstanceID) {
+                        $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", "Hook bereits vorhanden : " . $h['TargetID'], 0);
+                        return;
+                    }
+                    $hooks[$index]['TargetID'] = $this->InstanceID;
+                    $found = true;
+                }
+            }
+
+            if (!$found) {
+                $hooks[] = ['Hook' => $WebHook, 'TargetID' => $this->InstanceID];
+            }
+            $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", $WebHook . " erstellt", 0);
+            IPS_SetProperty($ids[0], 'Hooks', json_encode($hooks));
+            IPS_ApplyChanges($ids[0]);
+        }
+    }
+
+    protected function UnregisterHook($hook)
+    {
+        $WebHook = "/hook/Grafana" . $hook;
+
+        $ids = IPS_GetInstanceListByModuleID('{015A6EB8-D6E5-4B93-B496-0D3F77AE9FE1}');
+        if (count($ids) > 0) {
+            $hooks = json_decode(IPS_GetProperty($ids[0], 'Hooks'), true);
+            $found = false;
+            foreach ($hooks as $index => $h) {
+                if ($h['Hook'] == $WebHook) {
+                    $found = $index;
+                    break;
+                }
+            }
+
+            if ($found !== false) {
+                array_splice($hooks, $index, 1);
+                IPS_SetProperty($ids[0], 'Hooks', json_encode($hooks));
+                IPS_ApplyChanges($ids[0]);
+            }
+        }
+    }
+
+    //**************************************************************************
+    // Destroy
+    //**************************************************************************
+    public function Destroy()
+    {
+        if (!IPS_InstanceExists($this->InstanceID)) {
             $this->UnregisterHook("");
             $this->UnregisterHook("/query");
             $this->UnregisterHook("/search");
-			}
-			
+            $this->UnregisterHook("/metrics");
+            $this->UnregisterHook("/metric-payload-options");
+        }
 
-		//Never delete this line!
-		parent::Destroy();
-		}
-
-	}
+        parent::Destroy();
+    }
+}
