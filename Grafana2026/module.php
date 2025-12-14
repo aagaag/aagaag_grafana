@@ -84,7 +84,7 @@ class Grafana2026 extends IPSModule
         // /hook/Grafana/metrics
         // /hook/Grafana/query
         // /hook/Grafana/metric-payload-options
-        if (preg_match('~/hook/Grafana(?:/(.*))?$~i', $path, $m)) {
+        if (preg_match('~/hook/Grafana2026(?:/(.*))?$~i', $path, $m)) {
             $ep = isset($m[1]) ? strtolower(trim($m[1], '/')) : '';
             return $ep; // '' means root
         }
