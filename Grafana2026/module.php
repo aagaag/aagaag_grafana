@@ -648,49 +648,63 @@ class Grafana2026 extends IPSModule
     //  NOTE: returns JSON string (kept for backward compatibility)
     //******************************************************************************
     protected function ReturnMetrics($data_target)
-    {
-        $data_target = trim((string)$data_target);
-        $archiv = $this->GetArchivID();
-        $varList = IPS_GetVariableList();
+{
+    // --- Normalize and harden the search string ---
+    // Force scalar string
+    $data_target = trim((string)$data_target);
 
-        sort($varList);
+    // Treat common empty-payload artefacts as "no filter"
+    if ($data_target === '' || $data_target === '{}' || $data_target === '[]') {
+        $data_target = '';
+    }
 
-        $string = '[';
+    $archiv = $this->GetArchivID();
+    if ($archiv === false) {
+        // No archive -> no metrics
+        return '[]';
+    }
 
-        foreach ($varList as $var) {
-            $status = AC_GetLoggingStatus($archiv, $var);
-            if ($status == true) {
-                $name = IPS_GetName($var);
-                $name = str_replace("'", '"', $name);
-                $name = addslashes($name);
+    $varList = IPS_GetVariableList();
+    sort($varList);
 
-                $parent = IPS_GetParent($var);
-                $parent = IPS_GetName($parent);
-                $parent = str_replace("'", '"', $parent);
-                $parent = addslashes($parent);
+    $result = [];
 
-                $metrics = $var . "," . $name . "[" . $parent . "]";
+    foreach ($varList as $var) {
 
-                if ($data_target !== "") {
-                    $found = stripos($metrics, $data_target);
-                    if ($found === false) {
-                        continue;
-                    }
-                }
+        // Only logged variables
+        if (!AC_GetLoggingStatus($archiv, $var)) {
+            continue;
+        }
 
-                $string = $string . '"' . $metrics . '",';
+        // Build metric string
+        $name = IPS_GetName($var);
+        $name = str_replace("'", '"', $name);
+        $name = addslashes($name);
+
+        $parentId = IPS_GetParent($var);
+        $parent   = IPS_GetName($parentId);
+        $parent   = str_replace("'", '"', $parent);
+        $parent   = addslashes($parent);
+
+        $metric = $var . "," . $name . "[" . $parent . "]";
+
+        // --- Apply filter ONLY if there is a real search string ---
+        if ($data_target !== '') {
+            if (stripos($metric, $data_target) === false) {
+                continue;
             }
         }
 
-        // avoid invalid JSON if no entries matched
-        if ($string !== '[') {
-            $string = substr($string, 0, -1);
-        }
-        $string = $string . ']';
-
-        $this->SendDebug(__FUNCTION__ . "[" . __LINE__ . "]", $string, 0);
-        return $string;
+        $result[] = $metric;
     }
+
+    // Always return valid JSON
+    return json_encode(
+        $result,
+        JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+    );
+}
+
 
     //******************************************************************************
     //  Rueckgabewerte fuer eine Variable erstellen
