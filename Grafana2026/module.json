@@ -1,12 +1,9 @@
 {
   "id": "{9B2F6E3E-8F91-4E5B-A5D6-202600000002}",
   "name": "Grafana2026",
-  "url": "https://github.com/aagaag/aagaag_grafana",
-  "type": ORIGINAL_TYPE_VALUE,
+  "type": 3,
   "vendor": "aagaag",
-  "aliases": [
-    "Grafana2026"
-  ],
+  "aliases": ["Grafana2026"],
   "parentRequirements": [],
   "childRequirements": [],
   "implemented": [],
