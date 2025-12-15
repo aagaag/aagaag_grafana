@@ -1,155 +1,168 @@
-### IP-Symcon Modul // Grafana
+# IP-Symcon Module // Grafana2026
+
+## Documentation
+
+> **Note (Fork and Maintenance)**  
+> This module is a **fork of the original IP-Symcon Grafana module by user *1007***.  
+> The codebase was **modified and is maintained by AAGAAG** to restore compatibility with modern Grafana versions and the current *simpod JSON datasource*, and to fix multiple long‑standing bugs in the original implementation.
+
 ---
-## Dokumentation
 
-**Inhaltsverzeichnis**
+## Table of Contents
 
-1. [Funktionsumfang](#1-funktionsumfang) 
-2. [Systemanforderungen](#2-systemanforderungen)
-3. [Installation](#3-installation)
-4. [Konfiguration](#4-konfiguration)
-5. [Grafana](#5-grafana)
-6. [Grafana Tips](#6-grafanatips)
-7. [Changelog](#7-changelog)
-8. [ToDo Liste](#8-todoliste)
+1. [Functionality](#1-functionality)  
+2. [System Requirements](#2-system-requirements)  
+3. [Installation](#3-installation)  
+4. [Configuration](#4-configuration)  
+5. [Grafana Usage](#5-grafana-usage)  
+6. [Grafana Tips](#6-grafana-tips)  
+7. [Changelog](#7-changelog)  
+8. [To‑Do List](#8-to-do-list)
 
+---
 
-## 1. Funktionsumfang
-Dieses Modul bietet Grafana direkten Zugang zu allen geloggten Variablen. 
-Alle geloggten Variablen stehen automatisch in Grafana als Metrics zu Verfuegung.
+## 1. Functionality
 
+This module provides **direct access from Grafana to all logged IP‑Symcon variables**.
 
-## 2. Systemanforderungen
-- IP-Symcon ab Version 4.x
-- Grafana Installation
-- Grafana Plugin JSON by simpod
+All variables that are logged via the IP‑Symcon Archive Control are **automatically exposed as Grafana metrics** and can be selected directly in Grafana panels without any manual mapping or configuration.
+
+---
+
+## 2. System Requirements
+
+- IP‑Symcon **version 4.x or newer**
+- A working **Grafana installation**
+- Grafana datasource plugin **“JSON by simpod”** (current versions supported)
+
+---
 
 ## 3. Installation
-Über die Kern-Instanz "Module Control" folgende URL hinzufügen:
 
-`https://github.com/1007/Symcon1007_Grafana`
+Add the module repository via the **IP‑Symcon core instance “Module Control”**:
 
-Instanz hinzufuegen.
+```
+https://github.com/aagaag/aagaag_grafana
+```
 
-## 4. Konfiguration
-Das Modul ist unter den Kerninstanzen zu finden.
-In der Konfiguration kann ein User und Passwort vergeben werden.
-Dies muss mit der Einstellung in Grafana Data Sources /JSON
-uebereinstimmen. Aktiviere unter AUTH - Basic auth.
-Siehe Bild unter Punkt 5.
-Beides ohne Authorisierung ist auch moeglich.
-Der Test im Grafana-Plugin zeigt auch dann
-"Data source is working" wenn Authorisierung fehlerhaft, weil
-nur die Verbindung getestet wird nicht die Authorisierung.
+After updating the module list, create a new instance of **Grafana2026**.
 
+---
 
-Wer den Debug sich anschauen will, ist die Instanz in den Kerninstanzen zu finden.
+## 4. Configuration
 
-## 5. Grafana
-Konfiguration des Plugins JSON by simpo
-zum Beispiel:
-![Plugin](imgs/DataSources.png?raw=true "Plugin")
+The module is located under the **Core Instances** in IP‑Symcon.
 
-Grafiken in Grafana erstellen:
+You may configure a **username and password** for HTTP Basic Authentication.  
+These credentials **must match** the settings in the Grafana datasource configuration (JSON / simpod datasource → *Basic Auth*).
 
-- Einloggen mit Port 3000.
-- Dashboard erstellen
-- Darin ein Panel, oder mehrere, erstellen
-- Add Query . Darin JSON auswaehlen
-- Unter Metric koennen alle geloggten Variablen ausgewaehlt werden.
-- Erster Wert ist die ID
-- Zweiter Wert ist der Name fuer die Legende ( aenderbar)
-- URL auswaehlen fuer Webfront/IPSView unter Menuepunkt Share.
+Authentication is optional.  
+Please note that Grafana’s datasource test may still report *“Data source is working”* even if authentication is incorrect, because it only tests connectivity, not authorization.
 
-[Erste Schritte mit Grafana von Attain](https://github.com/1007/Symcon1007_Grafana/blob/master/imgs/Grafana.pdf)
+For debugging purposes, the instance can be inspected via the **Core Instances** debug output.
 
-[Mischen Grafiktypen](https://github.com/1007/Symcon1007_Grafana/blob/master/imgs/Mischen%20von%20Grafiktypen.pdf)
+---
 
-Optionale Einstellungen der Aggregationstufen:
-Fuer jeden Graph kann neben dem Feld "Metric" 
-das Feld "Additional JSON Data" benutzt werden.
-Dort kann eine Aggregationstufe , als JSON String ,
-fest vorgegeben werden.
-In der aktuellen Grafana Version heisst das Feld jetzt "Payload" !
-![Additional JSON Data](imgs/JSON.png?raw=true "Additional JSON Data")
+## 5. Grafana Usage
 
-- Stufe 0		Stuendliche Aggregation
-- Stufe 1		Taegliche Aggregation
-- Stufe 2		Woechentliche Aggregation
-- Stufe 3		Monatliche Aggregation
-- Stufe 4		Jaehrliche Aggregation
-- Stufe 5		5-Minuetige Aggregation
-- Stufe 6		1-Minuetige Aggregation
-- Stufe 99	keine Aggregation ( maximale Aufloesung )
+### Datasource configuration
 
+Use the **simpod JSON datasource** with the following URL:
 
-- TimeOffset	Vergleich zwischen zB 2 Zeitraeumen
-	{"TimeOffset" : 2592000} holt die Daten 30 Tage von der Vergangenheit	
+```
+http://<symcon-host>:3777/hook/Grafana2026
+```
 
-## 6. GrafanaTips
-Aenderung in der Konfigurationsdatei von Grafana sollen nicht in der defaults.ini
-gemacht werden.Die Datei defaults.ini kopieren nach custom.ini oder grafana.ini.
+Metrics will automatically appear in the **Metric** dropdown.
 
-Dienst neu starten.
+### Creating graphs
 
-Sollten die Grafiken im Webfront nicht angezeigt werden folgendes aendern in ini-Datei:
+1. Log in to Grafana (default port **3000**)
+2. Create a new dashboard
+3. Add one or more panels
+4. Add a query and select the **JSON** datasource
+5. Choose a metric from the dropdown
+6. The first part of the metric string is the variable ID
+7. The second part is used as the legend label (editable)
 
+---
 
-Von:
+### Aggregation and Payload options
 
-	allow_embedding: false
-	cookie_samesite: lax
+For each metric, the **Payload** field can be used to define aggregation behavior as JSON.
 
+Aggregation levels:
 
-Nach:
+- **0** – Hourly aggregation  
+- **1** – Daily aggregation  
+- **2** – Weekly aggregation  
+- **3** – Monthly aggregation  
+- **4** – Yearly aggregation  
+- **5** – 5‑minute aggregation  
+- **6** – 1‑minute aggregation  
+- **99** – No aggregation (maximum resolution)
 
-	allow_embedding: true
-	cookie_samesite: none
+### TimeOffset
 
+Time‑shifted comparisons can be performed using:
 
-Neustart nicht vergessen
+```json
+{"TimeOffset": 2592000}
+```
 
-Wer Chrome ab Version 80 einsetzt und sich nicht einloggen kann, soll
-mal folgenden Eintrag in der Konfiguration ueberpruefen:
+This shifts the query by **30 days into the past**.
 
-	set cookie SameSite attribute. defaults to 'lax'. can be set to "lax", "strict", "none" and "disabled"
-	cookie_samesite = none
-none funktioniert nicht mehr. Den Defaultwert 'lax' benutzen.
+---
 
+## 6. Grafana Tips
 
+- **Do not edit `defaults.ini`**.  
+  Copy it to `custom.ini` or `grafana.ini` instead.
 
-Wenn ihr in der Userverwaltung User nur mit Login habt.
-Dann kommt im Webfront/IPSView einmalig ein Anmeldebildschirm.
+- Restart the Grafana service after changes.
 
-Wer nur den Graph braucht, ohne die Auswahlmoeglichkeiten fuer Zeiten,
-nimmt am Besten nur den Link unter Share-Panel-Embed
+### Embedding Grafana in WebFront / IPSView
 
-Hintergrundfarbe auf "Transparent" setzen funktioniert nicht.
-In die index.html folgende Zeile einfuegen
+Recommended settings in `grafana.ini`:
 
-	<link rel="stylesheet" href="https://....../user/Grafana/mygrafana.css" type="text/css">
+```
+allow_embedding = true
+cookie_samesite = lax
+```
 
+Restart Grafana afterwards.
 
-Entsprechend die mygrafana.css erstellen und folgendes eintragen.
+For Chrome ≥ 80, `cookie_samesite = none` no longer works reliably; use `lax`.
 
-	@charset "UTF-8";
-	
-	.panel-container {
-	background-color: #xxxxxx !important;
-	border: 0px solid #FFFFFF !important;
-	}
+If users are configured with login only, a one‑time authentication dialog may appear in WebFront/IPSView.
 
-Bei dem Plugin JSON by simpo die Version 0.30 benutzen.
-Die neueren Versionen benutzen ein anderes Protokoll.
+For static graphs without time selection, use **Share → Panel → Embed**.
 
+Custom background styling can be achieved via an external CSS file referenced in `index.html`.
 
+---
 
 ## 7. Changelog
 
-Version 1.0	Startup
-Version 1.1 Verschiedene Fehler behoben. Doku verbessert.
+### Original module (1007)
 
-## 8. ToDoListe
+- **1.0** – Initial release  
+- **1.1** – Bug fixes and documentation improvements  
 
-Dokumentation verbessern.
+### Grafana2026 fork (Adriano Aguzzi)
 
+- Restored compatibility with modern Grafana versions
+- Added full support for the `/metrics` endpoint
+- Fixed empty metric dropdown behavior
+- Corrected `/query` endpoint routing and response format
+- Eliminated PHP warnings and fatal errors
+- Clean separation from the original module to avoid conflicts
+- Robust handling of aggregation, payload, and time offsets
+
+---
+
+## 8. To‑Do List
+
+- Further documentation improvements
+- Additional usage examples and screenshots
+- Optional performance optimizations for very large archives
